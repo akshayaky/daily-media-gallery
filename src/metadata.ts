@@ -13,14 +13,15 @@ import * as exifrNs from "exifr";
 import { RawMeta } from "./types";
 import { wallFromParts } from "./util";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const exifr: any = (exifrNs as any).default ?? exifrNs;
+// exifr ships a CJS default export that doesn't match its type declarations;
+// we must resolve the interop wrapper at runtime.
+const exifr = ((exifrNs as Record<string, unknown>).default ?? exifrNs) as typeof import("exifr");
 
 type FileHandle = Awaited<ReturnType<typeof fsp.open>>;
 
 /* ------------------------------------------------------------------ photos */
 
-const EXIF_RE = /^(\d{4})[:\-](\d{2})[:\-](\d{2})[ T](\d{2}):(\d{2}):(\d{2})/;
+const EXIF_RE = /^(\d{4})[:-](\d{2})[:-](\d{2})[ T](\d{2}):(\d{2}):(\d{2})/;
 
 function wallFromExifString(v: unknown): string | undefined {
   if (typeof v !== "string") return undefined;
@@ -37,14 +38,14 @@ export async function readPhotoMeta(path: string): Promise<RawMeta> {
     fh = await fsp.open(path, "r");
     const buf = Buffer.alloc(1024 * 1024); // EXIF lives at the start of the file
     const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
-    const data = await exifr.parse(buf.subarray(0, bytesRead), {
+    const data: Record<string, unknown> | undefined = await exifr.parse(buf.subarray(0, bytesRead), {
       pick: ["DateTimeOriginal", "CreateDate", "DateTimeDigitized"],
       reviveValues: false, // keep the raw "YYYY:MM:DD HH:MM:SS" string: it is local wall-clock time, no zone
     });
     const wall =
-      wallFromExifString(data?.DateTimeOriginal) ??
-      wallFromExifString(data?.CreateDate) ??
-      wallFromExifString(data?.DateTimeDigitized);
+      wallFromExifString(data?.["DateTimeOriginal"]) ??
+      wallFromExifString(data?.["CreateDate"]) ??
+      wallFromExifString(data?.["DateTimeDigitized"]);
     return wall ? { wall, wallSource: "exif" } : {};
   } catch {
     return {};

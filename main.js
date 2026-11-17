@@ -1851,7 +1851,18 @@ function fileUrl(absPath) {
 }
 function electron() {
   try {
-    return window.require("electron");
+    const win = window;
+    if (!win.require) return null;
+    let remoteMod;
+    try {
+      remoteMod = win.require("@electron/remote");
+    } catch {
+    }
+    const elMod = win.require("electron") ?? {};
+    if (remoteMod?.dialog && !elMod.remote?.dialog) {
+      elMod.remote = remoteMod;
+    }
+    return elMod;
   } catch {
     return null;
   }
@@ -1864,8 +1875,8 @@ function showInFolder(absPath) {
 }
 async function pickFolder() {
   const el = electron();
-  const dialog = el?.remote?.dialog;
-  if (dialog) {
+  const dialog = el?.remote?.dialog ?? el?.dialog;
+  if (dialog?.showOpenDialog) {
     const r = await dialog.showOpenDialog({ properties: ["openDirectory"] });
     return r.canceled || !r.filePaths?.length ? null : r.filePaths[0];
   }
@@ -1873,9 +1884,22 @@ async function pickFolder() {
     const input = document.createElement("input");
     input.type = "file";
     input.webkitdirectory = true;
+    input.style.display = "none";
+    document.body.appendChild(input);
+    let resolved = false;
+    const cleanup = () => {
+      if (input.parentNode) {
+        input.parentNode.removeChild(input);
+      }
+    };
     input.onchange = () => {
+      if (resolved) return;
+      resolved = true;
       const f = input.files?.[0];
-      if (!f) return resolve(null);
+      if (!f) {
+        cleanup();
+        return resolve(null);
+      }
       let p = f.path;
       if (!p) {
         try {
@@ -1883,6 +1907,7 @@ async function pickFolder() {
         } catch {
         }
       }
+      cleanup();
       if (!p) return resolve(null);
       const rel = f.webkitRelativePath;
       const norm = p.replace(/\\/g, "/");
@@ -1890,7 +1915,13 @@ async function pickFolder() {
       const base = norm.slice(0, norm.length - rel.length);
       resolve((base + root).replace(/\//g, import_obsidian2.Platform.isWin ? "\\" : "/"));
     };
-    input.oncancel = () => resolve(null);
+    input.oncancel = () => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve(null);
+      }
+    };
     input.click();
   });
 }
@@ -2048,7 +2079,7 @@ var path = __toESM(require("path"));
 var import_fs = require("fs");
 var exifrNs = __toESM(require_full_umd());
 var exifr = exifrNs.default ?? exifrNs;
-var EXIF_RE = /^(\d{4})[:\-](\d{2})[:\-](\d{2})[ T](\d{2}):(\d{2}):(\d{2})/;
+var EXIF_RE = /^(\d{4})[:-](\d{2})[:-](\d{2})[ T](\d{2}):(\d{2}):(\d{2})/;
 function wallFromExifString(v) {
   if (typeof v !== "string") return void 0;
   const m = EXIF_RE.exec(v.trim());
@@ -2068,7 +2099,7 @@ async function readPhotoMeta(path3) {
       reviveValues: false
       // keep the raw "YYYY:MM:DD HH:MM:SS" string: it is local wall-clock time, no zone
     });
-    const wall = wallFromExifString(data?.DateTimeOriginal) ?? wallFromExifString(data?.CreateDate) ?? wallFromExifString(data?.DateTimeDigitized);
+    const wall = wallFromExifString(data?.["DateTimeOriginal"]) ?? wallFromExifString(data?.["CreateDate"]) ?? wallFromExifString(data?.["DateTimeDigitized"]);
     return wall ? { wall, wallSource: "exif" } : {};
   } catch {
     return {};
@@ -2340,7 +2371,8 @@ var MediaIndex = class extends import_obsidian4.Events {
     try {
       const found = /* @__PURE__ */ new Set();
       const okRoots = [];
-      for (const root of s.folders) {
+      const folders = Array.isArray(s.folders) ? s.folders : typeof s.folders === "string" && s.folders.trim() ? [s.folders.trim()] : [];
+      for (const root of folders) {
         const r = path.normalize(root);
         const list = [];
         if (await walk(r, s.recursive, list)) okRoots.push(r);
@@ -2461,6 +2493,12 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
       cls: "setting-item-description",
       text: "Folders on your computer. Files are referenced where they are; nothing is copied into the vault."
     });
+    if (typeof s.folders === "string") {
+      const trimmed = s.folders.trim();
+      s.folders = trimmed ? [trimmed] : [];
+    } else if (!Array.isArray(s.folders)) {
+      s.folders = [];
+    }
     s.folders.forEach((folder, i) => {
       new import_obsidian5.Setting(el).setName(folder).addExtraButton(
         (b) => b.setIcon("trash").setTooltip("Remove").onClick(async () => {
@@ -2472,13 +2510,27 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
     });
     let typed = "";
     const addFolder = async (path3) => {
-      const v = path3.trim().replace(/^"|"$/g, "");
+      const v = path3.trim().replace(/^["']|["']$/g, "").trim();
       if (!v) return;
-      if (!s.folders.includes(v)) s.folders.push(v);
-      await p.saveSettings(true);
+      if (!Array.isArray(s.folders)) s.folders = [];
+      if (!s.folders.includes(v)) {
+        s.folders.push(v);
+        await p.saveSettings(true);
+        new import_obsidian5.Notice(`Added folder: ${v}`);
+      } else {
+        new import_obsidian5.Notice(`Folder already added: ${v}`);
+      }
       this.display();
     };
-    new import_obsidian5.Setting(el).setName("Add a folder").setDesc("Browse, or paste a full path such as D:\\Photos\\Phone").addText((t) => t.setPlaceholder("D:\\Photos\\Phone").onChange((v) => typed = v)).addButton((b) => b.setButtonText("Add").onClick(() => addFolder(typed))).addButton(
+    new import_obsidian5.Setting(el).setName("Add a folder").setDesc("Browse, or paste a full path such as D:\\Photos\\Phone").addText((t) => {
+      t.setPlaceholder("D:\\Photos\\Phone").onChange((v) => typed = v);
+      t.inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void addFolder(typed);
+        }
+      });
+    }).addButton((b) => b.setButtonText("Add").onClick(() => addFolder(typed))).addButton(
       (b) => b.setButtonText("Browse\u2026").onClick(async () => {
         const picked = await pickFolder();
         if (picked) await addFolder(picked);
@@ -2714,7 +2766,16 @@ var DailyMediaPlugin = class extends import_obsidian6.Plugin {
   }
   /* ----------------------------------------------------------------- settings */
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (typeof this.settings.folders === "string") {
+      const trimmed = this.settings.folders.trim();
+      this.settings.folders = trimmed ? [trimmed] : [];
+    } else if (!Array.isArray(this.settings.folders)) {
+      this.settings.folders = [];
+    } else {
+      this.settings.folders = this.settings.folders.map((f) => typeof f === "string" ? f.trim() : "").filter((f) => f.length > 0);
+    }
   }
   /** @param rescan true when folder list / recursion changed (re-walk the disk), false = just recompute dates */
   async saveSettings(rescan) {

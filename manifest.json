@@ -1,7 +1,7 @@
 {
   "id": "daily-media-gallery",
   "name": "Daily Media Gallery",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minAppVersion": "1.4.0",
   "description": "Shows the photos and videos from a folder on your disk inside your daily notes, matched by the real capture date stored in the file's metadata. Nothing is copied into the vault.",
   "author": "Akshay V",

@@ -99,7 +99,7 @@ export class MediaIndex extends Events {
   async loadCache(): Promise<void> {
     try {
       const a = this.plugin.app.vault.adapter;
-      if (await a.exists(this.cachePath)) this.cache = JSON.parse(await a.read(this.cachePath));
+      if (await a.exists(this.cachePath)) this.cache = JSON.parse(await a.read(this.cachePath)) as Record<string, CacheEntry>;
     } catch {
       this.cache = {};
     }
@@ -148,7 +148,12 @@ export class MediaIndex extends Events {
     try {
       const found = new Set<string>();
       const okRoots: string[] = [];
-      for (const root of s.folders) {
+      const folders = Array.isArray(s.folders)
+        ? s.folders
+        : typeof s.folders === "string" && (s.folders as string).trim()
+        ? [(s.folders as string).trim()]
+        : [];
+      for (const root of folders) {
         const r = path.normalize(root);
         const list: string[] = [];
         if (await walk(r, s.recursive, list)) okRoots.push(r);

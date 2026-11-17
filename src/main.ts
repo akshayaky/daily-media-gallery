@@ -123,7 +123,18 @@ export default class DailyMediaPlugin extends Plugin {
   /* ----------------------------------------------------------------- settings */
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) as Partial<DailyMediaSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (typeof this.settings.folders === "string") {
+      const trimmed = (this.settings.folders as string).trim();
+      this.settings.folders = trimmed ? [trimmed] : [];
+    } else if (!Array.isArray(this.settings.folders)) {
+      this.settings.folders = [];
+    } else {
+      this.settings.folders = this.settings.folders
+        .map((f) => (typeof f === "string" ? f.trim() : ""))
+        .filter((f) => f.length > 0);
+    }
   }
 
   /** @param rescan true when folder list / recursion changed (re-walk the disk), false = just recompute dates */

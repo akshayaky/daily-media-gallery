@@ -108,11 +108,41 @@ export function fileUrl(absPath: string): string {
   return "file:///" + encodePath(absPath);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function electron(): any | null {
+interface ElectronShell {
+  openPath(path: string): Promise<string>;
+  showItemInFolder(path: string): void;
+}
+interface ElectronWebUtils {
+  getPathForFile(file: File): string;
+}
+interface ElectronDialog {
+  showOpenDialog(opts: { properties: string[] }): Promise<{ canceled: boolean; filePaths: string[] }>;
+}
+interface ElectronRemote {
+  dialog: ElectronDialog;
+}
+interface ElectronModule {
+  shell?: ElectronShell;
+  remote?: ElectronRemote;
+  dialog?: ElectronDialog;
+  webUtils?: ElectronWebUtils;
+}
+
+function electron(): ElectronModule | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (window as any).require("electron");
+    const win = window as Window & { require?: (m: string) => unknown };
+    if (!win.require) return null;
+    let remoteMod: ElectronRemote | undefined;
+    try {
+      remoteMod = win.require("@electron/remote") as ElectronRemote | undefined;
+    } catch {
+      /* ignore */
+    }
+    const elMod = (win.require("electron") as ElectronModule) ?? {};
+    if (remoteMod?.dialog && !elMod.remote?.dialog) {
+      elMod.remote = remoteMod;
+    }
+    return elMod;
   } catch {
     return null;
   }
@@ -128,21 +158,35 @@ export function showInFolder(absPath: string): void {
 
 export async function pickFolder(): Promise<string | null> {
   const el = electron();
-  const dialog = el?.remote?.dialog;
-  if (dialog) {
+  const dialog = el?.remote?.dialog ?? el?.dialog;
+  if (dialog?.showOpenDialog) {
     const r = await dialog.showOpenDialog({ properties: ["openDirectory"] });
-    return r.canceled || !r.filePaths?.length ? null : (r.filePaths[0] as string);
+    return r.canceled || !r.filePaths?.length ? null : r.filePaths[0];
   }
   // Fallback: hidden <input webkitdirectory>
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
     (input as HTMLInputElement & { webkitdirectory: boolean }).webkitdirectory = true;
+    input.style.display = "none";
+    document.body.appendChild(input);
+
+    let resolved = false;
+    const cleanup = () => {
+      if (input.parentNode) {
+        input.parentNode.removeChild(input);
+      }
+    };
+
     input.onchange = () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const f = input.files?.[0] as any;
-      if (!f) return resolve(null);
-      let p: string | undefined = f.path;
+      if (resolved) return;
+      resolved = true;
+      const f = input.files?.[0];
+      if (!f) {
+        cleanup();
+        return resolve(null);
+      }
+      let p: string | undefined = (f as File & { path?: string }).path;
       if (!p) {
         try {
           p = el?.webUtils?.getPathForFile(f);
@@ -150,6 +194,7 @@ export async function pickFolder(): Promise<string | null> {
           /* ignore */
         }
       }
+      cleanup();
       if (!p) return resolve(null);
       const rel: string = f.webkitRelativePath; // "Folder/sub/file.jpg"
       const norm = p.replace(/\\/g, "/");
@@ -157,7 +202,15 @@ export async function pickFolder(): Promise<string | null> {
       const base = norm.slice(0, norm.length - rel.length);
       resolve((base + root).replace(/\//g, Platform.isWin ? "\\" : "/"));
     };
-    input.oncancel = () => resolve(null);
+
+    input.oncancel = () => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve(null);
+      }
+    };
+
     input.click();
   });
 }

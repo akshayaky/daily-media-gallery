@@ -70,6 +70,13 @@ export class DailyMediaSettingTab extends PluginSettingTab {
       text: "Folders on your computer. Files are referenced where they are; nothing is copied into the vault.",
     });
 
+    if (typeof s.folders === "string") {
+      const trimmed = (s.folders as string).trim();
+      s.folders = trimmed ? [trimmed] : [];
+    } else if (!Array.isArray(s.folders)) {
+      s.folders = [];
+    }
+
     s.folders.forEach((folder, i) => {
       new Setting(el).setName(folder).addExtraButton((b) =>
         b
@@ -85,16 +92,30 @@ export class DailyMediaSettingTab extends PluginSettingTab {
 
     let typed = "";
     const addFolder = async (path: string) => {
-      const v = path.trim().replace(/^"|"$/g, "");
+      const v = path.trim().replace(/^["']|["']$/g, "").trim();
       if (!v) return;
-      if (!s.folders.includes(v)) s.folders.push(v);
-      await p.saveSettings(true);
+      if (!Array.isArray(s.folders)) s.folders = [];
+      if (!s.folders.includes(v)) {
+        s.folders.push(v);
+        await p.saveSettings(true);
+        new Notice(`Added folder: ${v}`);
+      } else {
+        new Notice(`Folder already added: ${v}`);
+      }
       this.display();
     };
     new Setting(el)
       .setName("Add a folder")
       .setDesc("Browse, or paste a full path such as D:\\Photos\\Phone")
-      .addText((t) => t.setPlaceholder("D:\\Photos\\Phone").onChange((v) => (typed = v)))
+      .addText((t) => {
+        t.setPlaceholder("D:\\Photos\\Phone").onChange((v) => (typed = v));
+        t.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void addFolder(typed);
+          }
+        });
+      })
       .addButton((b) => b.setButtonText("Add").onClick(() => addFolder(typed)))
       .addButton((b) =>
         b.setButtonText("Browse…").onClick(async () => {
