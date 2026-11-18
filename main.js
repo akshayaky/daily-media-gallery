@@ -2764,7 +2764,7 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
     return items;
   }
   refresh() {
-    if (typeof this.update === "function") {
+    if ((0, import_obsidian5.requireApiVersion)("1.13.0")) {
       this.update();
     } else {
       const { containerEl: el } = this;

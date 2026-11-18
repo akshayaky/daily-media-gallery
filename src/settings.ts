@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting, SettingDefinitionItem } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, SettingDefinitionItem, requireApiVersion } from "obsidian";
 import type DailyMediaPlugin from "./main";
 import { pickFolder } from "./util";
 import { appHasDailyNotesPluginLoaded } from "obsidian-daily-notes-interface";
@@ -358,7 +358,7 @@ export class DailyMediaSettingTab extends PluginSettingTab {
   }
 
   private refresh(): void {
-    if (typeof this.update === "function") {
+    if (requireApiVersion("1.13.0")) {
       this.update();
     } else {
       const { containerEl: el } = this;
