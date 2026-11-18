@@ -38,10 +38,11 @@ export async function readPhotoMeta(path: string): Promise<RawMeta> {
     fh = await fsp.open(path, "r");
     const buf = Buffer.alloc(1024 * 1024); // EXIF lives at the start of the file
     const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
-    const data: Record<string, unknown> | undefined = await exifr.parse(buf.subarray(0, bytesRead), {
+    const parsed: unknown = await (exifr.parse(buf.subarray(0, bytesRead), {
       pick: ["DateTimeOriginal", "CreateDate", "DateTimeDigitized"],
       reviveValues: false, // keep the raw "YYYY:MM:DD HH:MM:SS" string: it is local wall-clock time, no zone
-    });
+    }) as Promise<unknown>);
+    const data = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
     const wall =
       wallFromExifString(data?.["DateTimeOriginal"]) ??
       wallFromExifString(data?.["CreateDate"]) ??

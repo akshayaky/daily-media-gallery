@@ -102,7 +102,7 @@ export class GalleryRenderer extends MarkdownRenderChild {
     }
 
     const grid = el.createDiv({ cls: "dm-grid" });
-    grid.style.setProperty("--dm-size", `${this.opts.size ?? s.thumbSize}px`);
+    grid.setCssProps({ "--dm-size": `${this.opts.size ?? s.thumbSize}px` });
     for (const e of items.slice(0, this.shown)) this.renderItem(grid, e);
 
     if (items.length > this.shown) {

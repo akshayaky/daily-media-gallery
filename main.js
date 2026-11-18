@@ -1881,16 +1881,16 @@ async function pickFolder() {
     return r.canceled || !r.filePaths?.length ? null : r.filePaths[0];
   }
   return new Promise((resolve) => {
-    const input = document.createElement("input");
-    input.type = "file";
+    const input = createEl("input", {
+      type: "file",
+      attr: { webkitdirectory: "true" }
+    });
     input.webkitdirectory = true;
-    input.style.display = "none";
+    input.setCssStyles({ display: "none" });
     document.body.appendChild(input);
     let resolved = false;
     const cleanup = () => {
-      if (input.parentNode) {
-        input.parentNode.removeChild(input);
-      }
+      input.detach();
     };
     input.onchange = () => {
       if (resolved) return;
@@ -2005,7 +2005,7 @@ var GalleryRenderer = class extends import_obsidian3.MarkdownRenderChild {
       return;
     }
     const grid = el.createDiv({ cls: "dm-grid" });
-    grid.style.setProperty("--dm-size", `${this.opts.size ?? s.thumbSize}px`);
+    grid.setCssProps({ "--dm-size": `${this.opts.size ?? s.thumbSize}px` });
     for (const e of items.slice(0, this.shown)) this.renderItem(grid, e);
     if (items.length > this.shown) {
       const more = el.createEl("button", { cls: "dm-more", text: `Show ${Math.min(s.maxItems, items.length - this.shown)} more (${items.length - this.shown} hidden)` });
@@ -2094,11 +2094,12 @@ async function readPhotoMeta(path3) {
     fh = await import_fs.promises.open(path3, "r");
     const buf = Buffer.alloc(1024 * 1024);
     const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
-    const data = await exifr.parse(buf.subarray(0, bytesRead), {
+    const parsed = await exifr.parse(buf.subarray(0, bytesRead), {
       pick: ["DateTimeOriginal", "CreateDate", "DateTimeDigitized"],
       reviveValues: false
       // keep the raw "YYYY:MM:DD HH:MM:SS" string: it is local wall-clock time, no zone
     });
+    const data = parsed && typeof parsed === "object" ? parsed : void 0;
     const wall = wallFromExifString(data?.["DateTimeOriginal"]) ?? wallFromExifString(data?.["CreateDate"]) ?? wallFromExifString(data?.["DateTimeDigitized"]);
     return wall ? { wall, wallSource: "exif" } : {};
   } catch {
@@ -2477,11 +2478,308 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
-  display() {
-    const { containerEl: el } = this;
+  getControlValue(key) {
+    return this.plugin.settings[key];
+  }
+  async setControlValue(key, value) {
+    const s = this.plugin.settings;
+    if (key === "videoTimezone" && typeof value === "string") {
+      s[key] = value.trim();
+    } else {
+      s[key] = value;
+    }
+    const needsRescan = key === "recursive";
+    await this.plugin.saveSettings(needsRescan);
+    if (key === "rescanMinutes") {
+      this.plugin.setupRescanTimer();
+    }
+  }
+  getSettingDefinitions() {
     const p = this.plugin;
     const s = p.settings;
+    const idx = p.index;
+    if (typeof s.folders === "string") {
+      const trimmed = s.folders.trim();
+      s.folders = trimmed ? [trimmed] : [];
+    } else if (!Array.isArray(s.folders)) {
+      s.folders = [];
+    }
+    const addFolder = async (path3) => {
+      const v = path3.trim().replace(/^["']|["']$/g, "").trim();
+      if (!v) return;
+      if (!Array.isArray(s.folders)) s.folders = [];
+      if (!s.folders.includes(v)) {
+        s.folders.push(v);
+        await p.saveSettings(true);
+        new import_obsidian5.Notice(`Added folder: ${v}`);
+      } else {
+        new import_obsidian5.Notice(`Folder already added: ${v}`);
+      }
+      this.refresh();
+    };
+    const photos = [...idx.entries.values()].filter((e) => e.kind === "image").length;
+    const videos = idx.entries.size - photos;
+    const items = [];
+    if (!appHasDailyNotesPluginLoaded()) {
+      items.push({
+        name: "Daily notes plugin required",
+        desc: "The core \u201CDaily notes\u201D plugin (or Periodic Notes) is not enabled. This plugin needs it.",
+        render: (setting) => {
+          setting.settingEl.addClass("mod-warning");
+        }
+      });
+    }
+    items.push(
+      {
+        type: "group",
+        heading: "Media folders",
+        items: [
+          {
+            name: "Storage locations",
+            desc: "Folders on your computer. Files are referenced where they are; nothing is copied into the vault.",
+            searchable: false
+          },
+          ...s.folders.map((folder, i) => ({
+            name: folder,
+            render: (setting) => {
+              setting.addExtraButton(
+                (b) => b.setIcon("trash").setTooltip("Remove").onClick(async () => {
+                  s.folders.splice(i, 1);
+                  await p.saveSettings(true);
+                  this.refresh();
+                })
+              );
+            }
+          })),
+          {
+            name: "Add a folder",
+            desc: "Browse, or paste a full path such as D:\\Photos\\Phone",
+            render: (setting) => {
+              let typed = "";
+              setting.addText((t) => {
+                t.setPlaceholder("D:\\Photos\\Phone").onChange((v) => typed = v);
+                t.inputEl.addEventListener("keydown", (e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void addFolder(typed);
+                  }
+                });
+              }).addButton((b) => b.setButtonText("Add").onClick(() => void addFolder(typed))).addButton(
+                (b) => b.setButtonText("Browse\u2026").onClick(async () => {
+                  const picked = await pickFolder();
+                  if (picked) await addFolder(picked);
+                  else new import_obsidian5.Notice("Couldn't open the folder picker. Paste the path instead.");
+                })
+              );
+            }
+          },
+          {
+            name: "Include sub-folders",
+            control: {
+              key: "recursive",
+              type: "toggle"
+            }
+          },
+          {
+            name: "Include photos",
+            control: {
+              key: "includePhotos",
+              type: "toggle"
+            }
+          },
+          {
+            name: "Include videos",
+            control: {
+              key: "includeVideos",
+              type: "toggle"
+            }
+          }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Date detection",
+        items: [
+          {
+            name: "Date detection order",
+            desc: "Order used: (1) date stored inside the file (photo EXIF, video creation date), (2) date in the file name, (3) file-system date. Windows' \u201CDate created/modified\u201D are only used as a last resort.",
+            searchable: false
+          },
+          {
+            name: "Use date in file name as fallback",
+            desc: "Matches names like IMG_20240501_211403.jpg or PXL_20240501_\u2026.mp4",
+            control: {
+              key: "useFilenameFallback",
+              type: "toggle"
+            }
+          },
+          {
+            name: "File-system fallback",
+            desc: "When a file has no embedded date and no date in its name. \u201CEarliest\u201D is safest: copying a file resets \u201Ccreated\u201D, but usually keeps \u201Cmodified\u201D.",
+            control: {
+              key: "fsFallback",
+              type: "dropdown",
+              options: {
+                earliest: "Earliest of created / modified",
+                modified: "Modified date",
+                created: "Created date",
+                skip: "Skip these files"
+              }
+            }
+          },
+          {
+            name: "Timezone for UTC-only videos",
+            desc: "Android and many cameras store video dates in UTC only. Enter an IANA timezone (e.g. Asia/Kolkata) to convert it to the local day. Leave blank to use this computer's timezone. iPhone videos already carry their local time.",
+            control: {
+              key: "videoTimezone",
+              type: "text",
+              placeholder: "(this computer)"
+            }
+          },
+          {
+            name: "Day starts at (hour)",
+            desc: "Set to e.g. 4 if clips filmed after midnight should belong to the previous day's note.",
+            control: {
+              key: "dayStartHour",
+              type: "slider",
+              min: 0,
+              max: 12,
+              step: 1
+            }
+          }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Daily notes",
+        items: [
+          {
+            name: "Add gallery to new daily notes",
+            desc: "When a daily note is created and has media for that day, a gallery block is inserted automatically.",
+            control: {
+              key: "autoInsert",
+              type: "toggle"
+            }
+          },
+          {
+            name: "Also add when opening an existing daily note",
+            desc: "Adds the block to older notes that have media but no gallery yet.",
+            control: {
+              key: "autoInsertOnOpen",
+              type: "toggle"
+            }
+          },
+          {
+            name: "Heading to insert under",
+            desc: "If this heading exists in the note the gallery goes beneath it, otherwise it is appended. Blank = no heading.",
+            control: {
+              key: "heading",
+              type: "text"
+            }
+          },
+          {
+            name: "Create the daily note if missing",
+            desc: "Used by \u201COpen daily note for this photo/video\u201D.",
+            control: {
+              key: "createIfMissing",
+              type: "toggle"
+            }
+          }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Display",
+        items: [
+          {
+            name: "Thumbnail size (px)",
+            control: {
+              key: "thumbSize",
+              type: "slider",
+              min: 100,
+              max: 400,
+              step: 10
+            }
+          },
+          {
+            name: "Show capture time",
+            control: {
+              key: "showTime",
+              type: "toggle"
+            }
+          },
+          {
+            name: "Show file names",
+            control: {
+              key: "showNames",
+              type: "toggle"
+            }
+          },
+          {
+            name: "Items shown before \u201CShow more\u201D",
+            control: {
+              key: "maxItems",
+              type: "number",
+              min: 1,
+              step: 1
+            }
+          }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Index",
+        items: [
+          {
+            name: `${photos} photos, ${videos} videos indexed`,
+            desc: idx.lastScan ? `Last scan: ${new Date(idx.lastScan).toLocaleString()}` : "Not scanned yet",
+            render: (setting) => {
+              setting.addButton(
+                (b) => b.setButtonText("Rescan now").onClick(async () => {
+                  await idx.scan();
+                  this.refresh();
+                })
+              ).addButton(
+                (b) => b.setButtonText("Clear cache").onClick(async () => {
+                  await idx.clearCache();
+                  await idx.scan();
+                  this.refresh();
+                })
+              );
+            }
+          },
+          {
+            name: "Auto-rescan every (minutes)",
+            desc: "0 = only on startup, when a daily note is created, and via the command.",
+            control: {
+              key: "rescanMinutes",
+              type: "number",
+              min: 0,
+              step: 1
+            }
+          }
+        ]
+      }
+    );
+    return items;
+  }
+  refresh() {
+    if (typeof this.update === "function") {
+      this.update();
+    } else {
+      const { containerEl: el } = this;
+      el.empty();
+      this.renderLegacy(el);
+    }
+  }
+  display() {
+    const { containerEl: el } = this;
     el.empty();
+    this.renderLegacy(el);
+  }
+  renderLegacy(el) {
+    const p = this.plugin;
+    const s = p.settings;
     if (!appHasDailyNotesPluginLoaded()) {
       el.createDiv({
         cls: "mod-warning",
@@ -2504,7 +2802,7 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
         (b) => b.setIcon("trash").setTooltip("Remove").onClick(async () => {
           s.folders.splice(i, 1);
           await p.saveSettings(true);
-          this.display();
+          this.refresh();
         })
       );
     });
@@ -2520,7 +2818,7 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
       } else {
         new import_obsidian5.Notice(`Folder already added: ${v}`);
       }
-      this.display();
+      this.refresh();
     };
     new import_obsidian5.Setting(el).setName("Add a folder").setDesc("Browse, or paste a full path such as D:\\Photos\\Phone").addText((t) => {
       t.setPlaceholder("D:\\Photos\\Phone").onChange((v) => typed = v);
@@ -2530,7 +2828,7 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
           void addFolder(typed);
         }
       });
-    }).addButton((b) => b.setButtonText("Add").onClick(() => addFolder(typed))).addButton(
+    }).addButton((b) => b.setButtonText("Add").onClick(() => void addFolder(typed))).addButton(
       (b) => b.setButtonText("Browse\u2026").onClick(async () => {
         const picked = await pickFolder();
         if (picked) await addFolder(picked);
@@ -2586,7 +2884,7 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
       })
     );
     new import_obsidian5.Setting(el).setName("Day starts at (hour)").setDesc("Set to e.g. 4 if clips filmed after midnight should belong to the previous day's note.").addSlider(
-      (sl) => sl.setLimits(0, 12, 1).setValue(s.dayStartHour).setDynamicTooltip().onChange(async (v) => {
+      (sl) => sl.setLimits(0, 12, 1).setValue(s.dayStartHour).onChange(async (v) => {
         s.dayStartHour = v;
         await p.saveSettings(false);
       })
@@ -2618,7 +2916,7 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
     );
     new import_obsidian5.Setting(el).setName("Display").setHeading();
     new import_obsidian5.Setting(el).setName("Thumbnail size (px)").addSlider(
-      (sl) => sl.setLimits(100, 400, 10).setValue(s.thumbSize).setDynamicTooltip().onChange(async (v) => {
+      (sl) => sl.setLimits(100, 400, 10).setValue(s.thumbSize).onChange(async (v) => {
         s.thumbSize = v;
         await p.saveSettings(false);
       })
@@ -2651,13 +2949,13 @@ var DailyMediaSettingTab = class extends import_obsidian5.PluginSettingTab {
     new import_obsidian5.Setting(el).setName(`${photos} photos, ${videos} videos indexed`).setDesc(idx.lastScan ? `Last scan: ${new Date(idx.lastScan).toLocaleString()}` : "Not scanned yet").addButton(
       (b) => b.setButtonText("Rescan now").onClick(async () => {
         await idx.scan();
-        this.display();
+        this.refresh();
       })
     ).addButton(
       (b) => b.setButtonText("Clear cache").onClick(async () => {
         await idx.clearCache();
         await idx.scan();
-        this.display();
+        this.refresh();
       })
     );
     new import_obsidian5.Setting(el).setName("Auto-rescan every (minutes)").setDesc("0 = only on startup, when a daily note is created, and via the command.").addText(

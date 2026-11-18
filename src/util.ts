@@ -165,17 +165,17 @@ export async function pickFolder(): Promise<string | null> {
   }
   // Fallback: hidden <input webkitdirectory>
   return new Promise((resolve) => {
-    const input = document.createElement("input");
-    input.type = "file";
+    const input = createEl("input", {
+      type: "file",
+      attr: { webkitdirectory: "true" },
+    });
     (input as HTMLInputElement & { webkitdirectory: boolean }).webkitdirectory = true;
-    input.style.display = "none";
+    input.setCssStyles({ display: "none" });
     document.body.appendChild(input);
 
     let resolved = false;
     const cleanup = () => {
-      if (input.parentNode) {
-        input.parentNode.removeChild(input);
-      }
+      input.detach();
     };
 
     input.onchange = () => {
