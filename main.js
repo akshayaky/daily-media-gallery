@@ -1819,13 +1819,14 @@ function dateKeyFromWall(wall, dayStartHour) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 function wallFromFilename(name) {
-  const m = /(?<![0-9])((?:19|20)\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?:[-_. T]?([01]\d|2[0-3])[-_.]?([0-5]\d)[-_.]?([0-5]\d))?/.exec(
+  const m = /(?<![0-9])((?:19|20)\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?:[-_. T]?([01]\d|2[0-3])[-_.]?([0-5]\d)(?:[-_.]?([0-5]\d))?)?/.exec(
     name
   );
   if (!m) return null;
   const [y, mo, d] = [+m[1], +m[2], +m[3]];
   if (m[4] === void 0) return wallFromParts(y, mo, d, 12, 0, 0);
-  return wallFromParts(y, mo, d, +m[4], +m[5], +m[6]);
+  const sec = m[6] !== void 0 ? +m[6] : 0;
+  return wallFromParts(y, mo, d, +m[4], +m[5], sec);
 }
 var cachedPrefix = null;
 function resourcePrefix(app) {
@@ -1840,14 +1841,22 @@ function resourcePrefix(app) {
   return cachedPrefix = "";
 }
 function encodePath(p) {
-  return encodeURI(p.replace(/\\/g, "/").replace(/^\/+/, "")).replace(/#/g, "%23").replace(/\?/g, "%3F");
+  const norm = p.replace(/\\/g, "/");
+  const isUnc = norm.startsWith("//");
+  const clean = isUnc ? norm.slice(2) : norm.replace(/^\/+/, "");
+  const encoded = encodeURI(clean).replace(/#/g, "%23").replace(/\?/g, "%3F");
+  return isUnc ? "//" + encoded : encoded;
 }
 function resourceUrl(app, absPath) {
   const prefix = resourcePrefix(app);
   return prefix ? prefix + encodePath(absPath) : fileUrl(absPath);
 }
 function fileUrl(absPath) {
-  return "file:///" + encodePath(absPath);
+  const enc = encodePath(absPath);
+  if (enc.startsWith("//")) {
+    return "file:" + enc;
+  }
+  return "file:///" + enc;
 }
 function electron() {
   try {
@@ -1953,66 +1962,183 @@ var SOURCE_LABEL = {
 function openLightbox(url, alt) {
   const ov = document.body.createDiv({ cls: "dm-lightbox" });
   ov.createEl("img", { attr: { src: url, alt } });
-  const onKey = (e) => {
-    if (e.key === "Escape") close();
-  };
   const close = () => {
     ov.remove();
     document.removeEventListener("keydown", onKey);
   };
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+  };
   ov.addEventListener("click", close);
   document.addEventListener("keydown", onKey);
 }
+var BATCH_SIZE = 12;
 var GalleryRenderer = class extends import_obsidian3.MarkdownRenderChild {
   constructor(el, plugin, dateKey, opts) {
     super(el);
     this.plugin = plugin;
     this.dateKey = dateKey;
     this.opts = opts;
-    this.lastSig = "";
+    this.lastItemsSig = "";
+    this.observer = null;
+    this.headEl = null;
+    this.countSpan = null;
+    this.statusSpan = null;
+    this.gridEl = null;
+    this.emptyEl = null;
+    this.moreBtn = null;
+    this.currentItems = [];
+    this.renderedCount = 0;
+    this.renderGen = 0;
+    this.pendingFrame = null;
     this.shown = opts.limit ?? plugin.settings.maxItems;
   }
   onload() {
     this.containerEl.addClass("dm-gallery");
+    if (typeof IntersectionObserver !== "undefined") {
+      this.observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              const target = entry.target;
+              const loadFn = target._dmLoadMedia;
+              if (loadFn) {
+                delete target._dmLoadMedia;
+                this.observer?.unobserve(target);
+                loadFn();
+              }
+            }
+          }
+        },
+        { rootMargin: "300px 0px" }
+      );
+    }
     this.registerEvent(this.plugin.index.on("updated", () => this.render()));
     this.render();
+  }
+  onunload() {
+    if (this.pendingFrame !== null) {
+      window.cancelAnimationFrame(this.pendingFrame);
+      this.pendingFrame = null;
+    }
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
   }
   render() {
     const el = this.containerEl;
     const idx = this.plugin.index;
     const items = idx.getForDate(this.dateKey).filter((e) => this.opts.type === "all" || this.opts.type === "photos" === (e.kind === "image"));
-    const sig = `${idx.scanning}|${this.shown}|${items.map((i) => i.path).join("\0")}`;
-    if (sig === this.lastSig) return;
-    this.lastSig = sig;
-    el.empty();
+    this.currentItems = items;
     const s = this.plugin.settings;
     const photos = items.filter((i) => i.kind === "image").length;
     const videos = items.length - photos;
-    const head = el.createDiv({ cls: "dm-head" });
-    head.createSpan({
-      cls: "dm-count",
-      text: `${photos} photo${photos === 1 ? "" : "s"} \xB7 ${videos} video${videos === 1 ? "" : "s"}`
-    });
-    if (idx.scanning) head.createSpan({ cls: "dm-status", text: "indexing\u2026" });
-    const refresh = head.createEl("button", { cls: "dm-refresh clickable-icon", attr: { "aria-label": "Rescan media folders" } });
-    (0, import_obsidian3.setIcon)(refresh, "refresh-cw");
-    refresh.addEventListener("click", () => void idx.scan());
+    if (!this.headEl) {
+      this.headEl = el.createDiv({ cls: "dm-head" });
+      this.countSpan = this.headEl.createSpan({ cls: "dm-count" });
+      this.statusSpan = this.headEl.createSpan({ cls: "dm-status" });
+      const refresh = this.headEl.createEl("button", {
+        cls: "dm-refresh clickable-icon",
+        attr: { "aria-label": "Rescan media folders" }
+      });
+      (0, import_obsidian3.setIcon)(refresh, "refresh-cw");
+      refresh.addEventListener("click", () => void idx.scan());
+    }
+    if (this.countSpan) {
+      this.countSpan.textContent = `${photos} photo${photos === 1 ? "" : "s"} \xB7 ${videos} video${videos === 1 ? "" : "s"}`;
+    }
+    if (this.statusSpan) {
+      this.statusSpan.textContent = idx.scanning ? "indexing\u2026" : "";
+      this.statusSpan.style.display = idx.scanning ? "" : "none";
+    }
     if (!items.length) {
+      if (this.gridEl) {
+        this.gridEl.remove();
+        this.gridEl = null;
+      }
+      if (this.moreBtn) {
+        this.moreBtn.remove();
+        this.moreBtn = null;
+      }
+      if (!this.emptyEl) {
+        this.emptyEl = el.createDiv({ cls: "dm-empty" });
+      }
       let msg = `No photos or videos found for ${this.dateKey}.`;
       if (!s.folders.length) msg = "No media folder selected yet. Add one in Settings \u2192 Daily Media Gallery.";
       else if (idx.scanning && !idx.ready) msg = "Looking for media\u2026";
-      el.createDiv({ cls: "dm-empty", text: msg });
+      this.emptyEl.textContent = msg;
+      this.lastItemsSig = "";
+      this.renderedCount = 0;
       return;
     }
-    const grid = el.createDiv({ cls: "dm-grid" });
-    grid.setCssProps({ "--dm-size": `${this.opts.size ?? s.thumbSize}px` });
-    for (const e of items.slice(0, this.shown)) this.renderItem(grid, e);
-    if (items.length > this.shown) {
-      const more = el.createEl("button", { cls: "dm-more", text: `Show ${Math.min(s.maxItems, items.length - this.shown)} more (${items.length - this.shown} hidden)` });
-      more.addEventListener("click", () => {
-        this.shown += s.maxItems;
-        this.render();
-      });
+    if (this.emptyEl) {
+      this.emptyEl.remove();
+      this.emptyEl = null;
+    }
+    const itemsSig = `${this.opts.size ?? s.thumbSize}|${items.map((i) => i.path).join("\0")}`;
+    const itemsChanged = itemsSig !== this.lastItemsSig;
+    if (itemsChanged) {
+      this.lastItemsSig = itemsSig;
+      this.renderGen++;
+      this.renderedCount = 0;
+      if (this.gridEl) {
+        this.gridEl.empty();
+      } else {
+        this.gridEl = el.createDiv({ cls: "dm-grid" });
+      }
+      this.gridEl.setCssProps({ "--dm-size": `${this.opts.size ?? s.thumbSize}px` });
+    }
+    if (!this.gridEl) {
+      this.gridEl = el.createDiv({ cls: "dm-grid" });
+      this.gridEl.setCssProps({ "--dm-size": `${this.opts.size ?? s.thumbSize}px` });
+    }
+    this.scheduleBatchRender();
+    this.updateMoreButton();
+  }
+  scheduleBatchRender() {
+    const targetCount = Math.min(this.shown, this.currentItems.length);
+    if (this.renderedCount >= targetCount || !this.gridEl) return;
+    if (this.pendingFrame !== null) {
+      window.cancelAnimationFrame(this.pendingFrame);
+      this.pendingFrame = null;
+    }
+    const currentGen = this.renderGen;
+    const renderNextBatch = () => {
+      this.pendingFrame = null;
+      if (currentGen !== this.renderGen || !this.gridEl) return;
+      const end = Math.min(this.renderedCount + BATCH_SIZE, targetCount);
+      for (let i = this.renderedCount; i < end; i++) {
+        this.renderItem(this.gridEl, this.currentItems[i]);
+      }
+      this.renderedCount = end;
+      if (this.renderedCount < targetCount) {
+        this.pendingFrame = window.requestAnimationFrame(renderNextBatch);
+      }
+    };
+    renderNextBatch();
+  }
+  updateMoreButton() {
+    const el = this.containerEl;
+    const s = this.plugin.settings;
+    const total = this.currentItems.length;
+    if (total > this.shown) {
+      const remaining = total - this.shown;
+      const nextBatch = Math.min(s.maxItems, remaining);
+      const text = `Show ${nextBatch} more (${remaining} hidden)`;
+      if (!this.moreBtn) {
+        this.moreBtn = el.createEl("button", { cls: "dm-more" });
+        this.moreBtn.addEventListener("click", () => {
+          this.shown += s.maxItems;
+          this.scheduleBatchRender();
+          this.updateMoreButton();
+        });
+      }
+      this.moreBtn.textContent = text;
+      el.appendChild(this.moreBtn);
+    } else if (this.moreBtn) {
+      this.moreBtn.remove();
+      this.moreBtn = null;
     }
   }
   renderItem(grid, e) {
@@ -2022,16 +2148,28 @@ var GalleryRenderer = class extends import_obsidian3.MarkdownRenderChild {
     const url = resourceUrl(this.plugin.app, e.path);
     if (!canPreview(e.name)) {
       this.placeholder(media, e, "No inline preview for this format");
-    } else if (e.kind === "image") {
-      const img = media.createEl("img", { attr: { loading: "lazy", decoding: "async", alt: e.name } });
-      this.withFallback(img, url, fileUrl(e.path), media, e);
-      img.addEventListener("click", () => openLightbox(img.currentSrc || img.src, e.name));
     } else {
-      const v = media.createEl("video", { attr: { controls: "", preload: "metadata", playsinline: "" } });
-      this.withFallback(v, url + "#t=0.1", fileUrl(e.path) + "#t=0.1", media, e);
+      const loadMedia = () => {
+        if (e.kind === "image") {
+          const img = media.createEl("img", { attr: { decoding: "async", alt: e.name } });
+          this.withFallback(img, url, fileUrl(e.path), media, e);
+          img.addEventListener("click", () => openLightbox(img.currentSrc || img.src, e.name));
+        } else {
+          const v = media.createEl("video", {
+            attr: { controls: "", preload: "metadata", playsinline: "" }
+          });
+          this.withFallback(v, url + "#t=0.1", fileUrl(e.path) + "#t=0.1", media, e);
+        }
+      };
+      if (this.observer) {
+        media._dmLoadMedia = loadMedia;
+        this.observer.observe(media);
+      } else {
+        loadMedia();
+      }
     }
     const showTime = this.opts.time ?? s.showTime;
-    const showNames = this.opts.names ?? s.showNames;
+    const showNames = this.opts.names !== void 0 ? this.opts.names : s.showNames || showTime;
     if (showTime || showNames) {
       const cap = item.createDiv({ cls: "dm-caption" });
       if (showTime) {
@@ -2039,7 +2177,10 @@ var GalleryRenderer = class extends import_obsidian3.MarkdownRenderChild {
         t.setAttr("title", `Date source: ${SOURCE_LABEL[e.source]}`);
         if (e.source === "file-system") t.addClass("dm-weak");
       }
-      if (showNames) cap.createSpan({ cls: "dm-name", text: e.name });
+      if (showNames) {
+        const nameSpan = cap.createSpan({ cls: "dm-name", text: e.name });
+        nameSpan.setAttr("title", e.name);
+      }
     }
     item.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
@@ -2048,6 +2189,14 @@ var GalleryRenderer = class extends import_obsidian3.MarkdownRenderChild {
     });
   }
   withFallback(el, primary, secondary, media, e) {
+    if (primary === secondary) {
+      el.addEventListener("error", () => {
+        el.remove();
+        this.placeholder(media, e, "Can't preview here: click to open");
+      });
+      el.src = primary;
+      return;
+    }
     let tried = false;
     el.addEventListener("error", () => {
       if (!tried) {
@@ -2092,7 +2241,7 @@ async function readPhotoMeta(path3) {
   let fh;
   try {
     fh = await import_fs.promises.open(path3, "r");
-    const buf = Buffer.alloc(1024 * 1024);
+    const buf = Buffer.allocUnsafe(256 * 1024);
     const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
     const parsed = await exifr.parse(buf.subarray(0, bytesRead), {
       pick: ["DateTimeOriginal", "CreateDate", "DateTimeDigitized"],
@@ -2203,7 +2352,7 @@ async function parseMoov(fh, start, end, out) {
       await fh.read(b, 0, 12, box.contentStart);
       const secs = b[0] === 1 ? Number(b.readBigUInt64BE(4)) : b.readUInt32BE(4);
       const ms = (secs - MAC_EPOCH_OFFSET_S) * 1e3;
-      if (ms > Date.UTC(1990, 0, 1) && ms < Date.now() + 2 * 864e5) out.utcMs = ms;
+      if (ms > Date.UTC(1970, 0, 1) && ms < Date.now() + 2 * 864e5) out.utcMs = ms;
     } else if (box.type === "meta") {
       qtMeta = qtMeta ?? await readMetaBox(fh, box);
     } else if (box.type === "udta") {
@@ -2263,25 +2412,29 @@ async function walk(dir, recursive, out) {
   } catch {
     return false;
   }
+  const subdirs = [];
   for (const it of items) {
     if (it.name.startsWith(".") || SKIP_DIRS.has(it.name)) continue;
     const full = path.join(dir, it.name);
     if (it.isDirectory()) {
-      if (recursive) await walk(full, true, out);
+      if (recursive) subdirs.push(full);
     } else if (it.isFile() && getKind(it.name)) {
       out.push(full);
     }
   }
+  if (subdirs.length > 0) {
+    await Promise.all(subdirs.map((sub) => walk(sub, true, out)));
+  }
   return true;
 }
-async function runPool(tasks, n) {
+async function runPool(items, n, fn) {
   let i = 0;
   await Promise.all(
-    Array.from({ length: n }, async () => {
-      while (i < tasks.length) {
-        const t = tasks[i++];
+    Array.from({ length: Math.min(n, items.length || 1) }, async () => {
+      while (i < items.length) {
+        const item = items[i++];
         try {
-          await t();
+          await fn(item);
         } catch {
         }
       }
@@ -2380,12 +2533,13 @@ var MediaIndex = class extends import_obsidian4.Events {
         list.forEach((f) => found.add(f));
       }
       const files = [...found];
-      await runPool(
-        files.map((f) => () => this.ensureCache(f)),
-        8
-      );
+      await runPool(files, 8, (f) => this.ensureCache(f));
+      const isSubPath = (file, root) => {
+        const rel = path.relative(root, file);
+        return !rel.startsWith("..") && !path.isAbsolute(rel);
+      };
       for (const k of Object.keys(this.cache)) {
-        if (!found.has(k) && okRoots.some((r) => k.startsWith(r))) delete this.cache[k];
+        if (!found.has(k) && okRoots.some((r) => isSubPath(k, r))) delete this.cache[k];
       }
       this.files = files.filter((f) => this.cache[f]);
       this.lastScan = Date.now();
@@ -2469,7 +2623,7 @@ var DEFAULT_SETTINGS = {
   createIfMissing: true,
   thumbSize: 180,
   showTime: true,
-  showNames: false,
+  showNames: true,
   maxItems: 60,
   rescanMinutes: 0
 };
@@ -2992,7 +3146,9 @@ var DailyMediaPlugin = class extends import_obsidian6.Plugin {
         el.createDiv({ cls: "dm-empty", text: "daily-media: this isn't a daily note. Add a line like \u201Cdate: 2024-05-01\u201D." });
         return;
       }
-      void this.index.ensureFresh(2 * 6e4);
+      if (this.settings.rescanMinutes > 0) {
+        void this.index.ensureFresh(this.settings.rescanMinutes * 6e4);
+      }
       ctx.addChild(new GalleryRenderer(el, this, dateKey, opts));
     });
     this.addCommand({
@@ -3066,6 +3222,9 @@ var DailyMediaPlugin = class extends import_obsidian6.Plugin {
   async loadSettings() {
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (data?.showNames === void 0) {
+      this.settings.showNames = true;
+    }
     if (typeof this.settings.folders === "string") {
       const trimmed = this.settings.folders.trim();
       this.settings.folders = trimmed ? [trimmed] : [];
@@ -3091,7 +3250,9 @@ var DailyMediaPlugin = class extends import_obsidian6.Plugin {
   /* -------------------------------------------------------------- daily notes */
   async autoInsert(file) {
     if (file.extension !== "md" || !getDateFromFile(file, "day")) return;
-    await this.index.ensureFresh(3e4);
+    if (this.settings.rescanMinutes > 0) {
+      await this.index.ensureFresh(this.settings.rescanMinutes * 6e4);
+    }
     await this.insertGallery(file, true);
   }
   async insertGallery(file, onlyIfMedia) {

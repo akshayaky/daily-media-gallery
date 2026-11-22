@@ -36,7 +36,7 @@ export async function readPhotoMeta(path: string): Promise<RawMeta> {
   let fh: FileHandle | undefined;
   try {
     fh = await fsp.open(path, "r");
-    const buf = Buffer.alloc(1024 * 1024); // EXIF lives at the start of the file
+    const buf = Buffer.allocUnsafe(256 * 1024); // EXIF/headers live at the start of the file
     const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
     const parsed: unknown = await (exifr.parse(buf.subarray(0, bytesRead), {
       pick: ["DateTimeOriginal", "CreateDate", "DateTimeDigitized"],
@@ -169,7 +169,7 @@ async function parseMoov(fh: FileHandle, start: number, end: number, out: RawMet
       await fh.read(b, 0, 12, box.contentStart);
       const secs = b[0] === 1 ? Number(b.readBigUInt64BE(4)) : b.readUInt32BE(4);
       const ms = (secs - MAC_EPOCH_OFFSET_S) * 1000;
-      if (ms > Date.UTC(1990, 0, 1) && ms < Date.now() + 2 * 86_400_000) out.utcMs = ms;
+      if (ms > Date.UTC(1970, 0, 1) && ms < Date.now() + 2 * 86_400_000) out.utcMs = ms;
     } else if (box.type === "meta") {
       qtMeta = qtMeta ?? (await readMetaBox(fh, box));
     } else if (box.type === "udta") {

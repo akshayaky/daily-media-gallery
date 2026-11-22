@@ -17,10 +17,12 @@
 }
 .dm-media img, .dm-media video { width: 100%; height: 100%; object-fit: cover; display: block; }
 .dm-media img { cursor: zoom-in; }
-.dm-video .dm-media video { object-fit: contain; background: #000; }
+.dm-media video, .dm-video .dm-media { cursor: pointer; }
+.dm-video .dm-media video { object-fit: contain; background: #000; cursor: pointer; }
 
-.dm-caption { display: flex; gap: 6px; font-size: var(--font-ui-smaller); color: var(--text-muted); overflow: hidden; white-space: nowrap; }
-.dm-name { overflow: hidden; text-overflow: ellipsis; }
+.dm-caption { display: flex; align-items: center; gap: 6px; font-size: var(--font-ui-smaller); color: var(--text-muted); overflow: hidden; white-space: nowrap; min-width: 0; }
+.dm-time { flex-shrink: 0; }
+.dm-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dm-weak { opacity: 0.6; text-decoration: underline dotted; }
 
 .dm-placeholder {

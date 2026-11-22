@@ -40,20 +40,39 @@ const SOURCE_LABEL: Record<MediaEntry["source"], string> = {
 function openLightbox(url: string, alt: string): void {
   const ov = document.body.createDiv({ cls: "dm-lightbox" });
   ov.createEl("img", { attr: { src: url, alt } });
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") close();
-  };
   const close = () => {
     ov.remove();
     document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") close();
   };
   ov.addEventListener("click", close);
   document.addEventListener("keydown", onKey);
 }
 
+const BATCH_SIZE = 12;
+
+interface LazyLoadableElement extends HTMLElement {
+  _dmLoadMedia?: () => void;
+}
+
 export class GalleryRenderer extends MarkdownRenderChild {
   private shown: number;
-  private lastSig = "";
+  private lastItemsSig = "";
+  private observer: IntersectionObserver | null = null;
+
+  private headEl: HTMLElement | null = null;
+  private countSpan: HTMLElement | null = null;
+  private statusSpan: HTMLElement | null = null;
+  private gridEl: HTMLElement | null = null;
+  private emptyEl: HTMLElement | null = null;
+  private moreBtn: HTMLElement | null = null;
+
+  private currentItems: MediaEntry[] = [];
+  private renderedCount = 0;
+  private renderGen = 0;
+  private pendingFrame: number | null = null;
 
   constructor(el: HTMLElement, private plugin: DailyMediaPlugin, private dateKey: string, private opts: BlockOptions) {
     super(el);
@@ -62,8 +81,39 @@ export class GalleryRenderer extends MarkdownRenderChild {
 
   onload(): void {
     this.containerEl.addClass("dm-gallery");
+
+    if (typeof IntersectionObserver !== "undefined") {
+      this.observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              const target = entry.target as LazyLoadableElement;
+              const loadFn = target._dmLoadMedia;
+              if (loadFn) {
+                delete target._dmLoadMedia;
+                this.observer?.unobserve(target);
+                loadFn();
+              }
+            }
+          }
+        },
+        { rootMargin: "300px 0px" }
+      );
+    }
+
     this.registerEvent(this.plugin.index.on("updated", () => this.render()));
     this.render();
+  }
+
+  onunload(): void {
+    if (this.pendingFrame !== null) {
+      window.cancelAnimationFrame(this.pendingFrame);
+      this.pendingFrame = null;
+    }
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
   }
 
   private render(): void {
@@ -73,66 +123,168 @@ export class GalleryRenderer extends MarkdownRenderChild {
       .getForDate(this.dateKey)
       .filter((e) => this.opts.type === "all" || (this.opts.type === "photos") === (e.kind === "image"));
 
-    // Don't tear down playing videos when nothing visible changed.
-    const sig = `${idx.scanning}|${this.shown}|${items.map((i) => i.path).join("\0")}`;
-    if (sig === this.lastSig) return;
-    this.lastSig = sig;
-
-    el.empty();
+    this.currentItems = items;
     const s = this.plugin.settings;
     const photos = items.filter((i) => i.kind === "image").length;
     const videos = items.length - photos;
 
-    const head = el.createDiv({ cls: "dm-head" });
-    head.createSpan({
-      cls: "dm-count",
-      text: `${photos} photo${photos === 1 ? "" : "s"} · ${videos} video${videos === 1 ? "" : "s"}`,
-    });
-    if (idx.scanning) head.createSpan({ cls: "dm-status", text: "indexing…" });
-    const refresh = head.createEl("button", { cls: "dm-refresh clickable-icon", attr: { "aria-label": "Rescan media folders" } });
-    setIcon(refresh, "refresh-cw");
-    refresh.addEventListener("click", () => void idx.scan());
+    if (!this.headEl) {
+      this.headEl = el.createDiv({ cls: "dm-head" });
+      this.countSpan = this.headEl.createSpan({ cls: "dm-count" });
+      this.statusSpan = this.headEl.createSpan({ cls: "dm-status" });
+      const refresh = this.headEl.createEl("button", {
+        cls: "dm-refresh clickable-icon",
+        attr: { "aria-label": "Rescan media folders" },
+      });
+      setIcon(refresh, "refresh-cw");
+      refresh.addEventListener("click", () => void idx.scan());
+    }
+
+    if (this.countSpan) {
+      this.countSpan.textContent = `${photos} photo${photos === 1 ? "" : "s"} · ${videos} video${videos === 1 ? "" : "s"}`;
+    }
+    if (this.statusSpan) {
+      this.statusSpan.textContent = idx.scanning ? "indexing…" : "";
+      this.statusSpan.style.display = idx.scanning ? "" : "none";
+    }
 
     if (!items.length) {
+      if (this.gridEl) {
+        this.gridEl.remove();
+        this.gridEl = null;
+      }
+      if (this.moreBtn) {
+        this.moreBtn.remove();
+        this.moreBtn = null;
+      }
+      if (!this.emptyEl) {
+        this.emptyEl = el.createDiv({ cls: "dm-empty" });
+      }
       let msg = `No photos or videos found for ${this.dateKey}.`;
       if (!s.folders.length) msg = "No media folder selected yet. Add one in Settings → Daily Media Gallery.";
       else if (idx.scanning && !idx.ready) msg = "Looking for media…";
-      el.createDiv({ cls: "dm-empty", text: msg });
+      this.emptyEl.textContent = msg;
+      this.lastItemsSig = "";
+      this.renderedCount = 0;
       return;
     }
 
-    const grid = el.createDiv({ cls: "dm-grid" });
-    grid.setCssProps({ "--dm-size": `${this.opts.size ?? s.thumbSize}px` });
-    for (const e of items.slice(0, this.shown)) this.renderItem(grid, e);
+    if (this.emptyEl) {
+      this.emptyEl.remove();
+      this.emptyEl = null;
+    }
 
-    if (items.length > this.shown) {
-      const more = el.createEl("button", { cls: "dm-more", text: `Show ${Math.min(s.maxItems, items.length - this.shown)} more (${items.length - this.shown} hidden)` });
-      more.addEventListener("click", () => {
-        this.shown += s.maxItems;
-        this.render();
-      });
+    const itemsSig = `${this.opts.size ?? s.thumbSize}|${items.map((i) => i.path).join("\0")}`;
+    const itemsChanged = itemsSig !== this.lastItemsSig;
+
+    if (itemsChanged) {
+      this.lastItemsSig = itemsSig;
+      this.renderGen++;
+      this.renderedCount = 0;
+      if (this.gridEl) {
+        this.gridEl.empty();
+      } else {
+        this.gridEl = el.createDiv({ cls: "dm-grid" });
+      }
+      this.gridEl.setCssProps({ "--dm-size": `${this.opts.size ?? s.thumbSize}px` });
+    }
+
+    if (!this.gridEl) {
+      this.gridEl = el.createDiv({ cls: "dm-grid" });
+      this.gridEl.setCssProps({ "--dm-size": `${this.opts.size ?? s.thumbSize}px` });
+    }
+
+    this.scheduleBatchRender();
+    this.updateMoreButton();
+  }
+
+  private scheduleBatchRender(): void {
+    const targetCount = Math.min(this.shown, this.currentItems.length);
+    if (this.renderedCount >= targetCount || !this.gridEl) return;
+
+    if (this.pendingFrame !== null) {
+      window.cancelAnimationFrame(this.pendingFrame);
+      this.pendingFrame = null;
+    }
+
+    const currentGen = this.renderGen;
+
+    const renderNextBatch = () => {
+      this.pendingFrame = null;
+      if (currentGen !== this.renderGen || !this.gridEl) return;
+
+      const end = Math.min(this.renderedCount + BATCH_SIZE, targetCount);
+      for (let i = this.renderedCount; i < end; i++) {
+        this.renderItem(this.gridEl, this.currentItems[i]);
+      }
+      this.renderedCount = end;
+
+      if (this.renderedCount < targetCount) {
+        this.pendingFrame = window.requestAnimationFrame(renderNextBatch);
+      }
+    };
+
+    renderNextBatch();
+  }
+
+  private updateMoreButton(): void {
+    const el = this.containerEl;
+    const s = this.plugin.settings;
+    const total = this.currentItems.length;
+
+    if (total > this.shown) {
+      const remaining = total - this.shown;
+      const nextBatch = Math.min(s.maxItems, remaining);
+      const text = `Show ${nextBatch} more (${remaining} hidden)`;
+
+      if (!this.moreBtn) {
+        this.moreBtn = el.createEl("button", { cls: "dm-more" });
+        this.moreBtn.addEventListener("click", () => {
+          this.shown += s.maxItems;
+          this.scheduleBatchRender();
+          this.updateMoreButton();
+        });
+      }
+      this.moreBtn.textContent = text;
+      el.appendChild(this.moreBtn);
+    } else if (this.moreBtn) {
+      this.moreBtn.remove();
+      this.moreBtn = null;
     }
   }
 
   private renderItem(grid: HTMLElement, e: MediaEntry): void {
     const s = this.plugin.settings;
     const item = grid.createDiv({ cls: `dm-item dm-${e.kind}` });
-    const media = item.createDiv({ cls: "dm-media" });
+    const media = item.createDiv({ cls: "dm-media" }) as LazyLoadableElement;
     const url = resourceUrl(this.plugin.app, e.path);
 
     if (!canPreview(e.name)) {
       this.placeholder(media, e, "No inline preview for this format");
-    } else if (e.kind === "image") {
-      const img = media.createEl("img", { attr: { loading: "lazy", decoding: "async", alt: e.name } });
-      this.withFallback(img, url, fileUrl(e.path), media, e);
-      img.addEventListener("click", () => openLightbox(img.currentSrc || img.src, e.name));
     } else {
-      const v = media.createEl("video", { attr: { controls: "", preload: "metadata", playsinline: "" } });
-      this.withFallback(v, url + "#t=0.1", fileUrl(e.path) + "#t=0.1", media, e);
+      const loadMedia = () => {
+        if (e.kind === "image") {
+          const img = media.createEl("img", { attr: { decoding: "async", alt: e.name } });
+          this.withFallback(img, url, fileUrl(e.path), media, e);
+          img.addEventListener("click", () => openLightbox(img.currentSrc || img.src, e.name));
+        } else {
+          const v = media.createEl("video", {
+            attr: { controls: "", preload: "metadata", playsinline: "" },
+          });
+          this.withFallback(v, url + "#t=0.1", fileUrl(e.path) + "#t=0.1", media, e);
+        }
+      };
+
+      if (this.observer) {
+        media._dmLoadMedia = loadMedia;
+        this.observer.observe(media);
+      } else {
+        loadMedia();
+      }
     }
 
     const showTime = this.opts.time ?? s.showTime;
-    const showNames = this.opts.names ?? s.showNames;
+    const showNames = this.opts.names !== undefined ? this.opts.names : (s.showNames || showTime);
     if (showTime || showNames) {
       const cap = item.createDiv({ cls: "dm-caption" });
       if (showTime) {
@@ -140,7 +292,10 @@ export class GalleryRenderer extends MarkdownRenderChild {
         t.setAttr("title", `Date source: ${SOURCE_LABEL[e.source]}`);
         if (e.source === "file-system") t.addClass("dm-weak");
       }
-      if (showNames) cap.createSpan({ cls: "dm-name", text: e.name });
+      if (showNames) {
+        const nameSpan = cap.createSpan({ cls: "dm-name", text: e.name });
+        nameSpan.setAttr("title", e.name);
+      }
     }
 
     item.addEventListener("contextmenu", (ev) => {
@@ -150,7 +305,21 @@ export class GalleryRenderer extends MarkdownRenderChild {
     });
   }
 
-  private withFallback(el: HTMLImageElement | HTMLVideoElement, primary: string, secondary: string, media: HTMLElement, e: MediaEntry): void {
+  private withFallback(
+    el: HTMLImageElement | HTMLVideoElement,
+    primary: string,
+    secondary: string,
+    media: HTMLElement,
+    e: MediaEntry
+  ): void {
+    if (primary === secondary) {
+      el.addEventListener("error", () => {
+        el.remove();
+        this.placeholder(media, e, "Can't preview here: click to open");
+      });
+      el.src = primary;
+      return;
+    }
     let tried = false;
     el.addEventListener("error", () => {
       if (!tried) {

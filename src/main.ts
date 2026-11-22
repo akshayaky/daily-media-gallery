@@ -37,7 +37,9 @@ export default class DailyMediaPlugin extends Plugin {
         el.createDiv({ cls: "dm-empty", text: "daily-media: this isn't a daily note. Add a line like “date: 2024-05-01”." });
         return;
       }
-      void this.index.ensureFresh(2 * 60_000);
+      if (this.settings.rescanMinutes > 0) {
+        void this.index.ensureFresh(this.settings.rescanMinutes * 60_000);
+      }
       ctx.addChild(new GalleryRenderer(el, this, dateKey, opts));
     });
 
@@ -125,6 +127,9 @@ export default class DailyMediaPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const data = (await this.loadData()) as Partial<DailyMediaSettings> | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (data?.showNames === undefined) {
+      this.settings.showNames = true;
+    }
     if (typeof this.settings.folders === "string") {
       const trimmed = (this.settings.folders as string).trim();
       this.settings.folders = trimmed ? [trimmed] : [];
@@ -156,7 +161,9 @@ export default class DailyMediaPlugin extends Plugin {
 
   private async autoInsert(file: TFile): Promise<void> {
     if (file.extension !== "md" || !getDateFromFile(file, "day")) return;
-    await this.index.ensureFresh(30_000);
+    if (this.settings.rescanMinutes > 0) {
+      await this.index.ensureFresh(this.settings.rescanMinutes * 60_000);
+    }
     await this.insertGallery(file, true);
   }
 

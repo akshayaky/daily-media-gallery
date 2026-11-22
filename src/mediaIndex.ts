@@ -16,26 +16,30 @@ async function walk(dir: string, recursive: boolean, out: string[]): Promise<boo
   } catch {
     return false;
   }
+  const subdirs: string[] = [];
   for (const it of items) {
     if (it.name.startsWith(".") || SKIP_DIRS.has(it.name)) continue;
     const full = path.join(dir, it.name);
     if (it.isDirectory()) {
-      if (recursive) await walk(full, true, out);
+      if (recursive) subdirs.push(full);
     } else if (it.isFile() && getKind(it.name)) {
       out.push(full);
     }
   }
+  if (subdirs.length > 0) {
+    await Promise.all(subdirs.map((sub) => walk(sub, true, out)));
+  }
   return true;
 }
 
-async function runPool(tasks: Array<() => Promise<void>>, n: number): Promise<void> {
+async function runPool<T>(items: T[], n: number, fn: (item: T) => Promise<void>): Promise<void> {
   let i = 0;
   await Promise.all(
-    Array.from({ length: n }, async () => {
-      while (i < tasks.length) {
-        const t = tasks[i++];
+    Array.from({ length: Math.min(n, items.length || 1) }, async () => {
+      while (i < items.length) {
+        const item = items[i++];
         try {
-          await t();
+          await fn(item);
         } catch {
           /* skip unreadable file */
         }
@@ -160,13 +164,14 @@ export class MediaIndex extends Events {
         list.forEach((f) => found.add(f));
       }
       const files = [...found];
-      await runPool(
-        files.map((f) => () => this.ensureCache(f)),
-        8
-      );
+      await runPool(files, 8, (f) => this.ensureCache(f));
       // forget files that disappeared from folders we could actually read
+      const isSubPath = (file: string, root: string): boolean => {
+        const rel = path.relative(root, file);
+        return !rel.startsWith("..") && !path.isAbsolute(rel);
+      };
       for (const k of Object.keys(this.cache)) {
-        if (!found.has(k) && okRoots.some((r) => k.startsWith(r))) delete this.cache[k];
+        if (!found.has(k) && okRoots.some((r) => isSubPath(k, r))) delete this.cache[k];
       }
       this.files = files.filter((f) => this.cache[f]);
       this.lastScan = Date.now();

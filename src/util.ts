@@ -71,13 +71,14 @@ export function dateKeyFromWall(wall: string, dayStartHour: number): string {
 
 /** Dates embedded in names like IMG_20240501_211403.jpg, PXL_20240501_..., IMG-20240501-WA0001.jpg */
 export function wallFromFilename(name: string): string | null {
-  const m = /(?<![0-9])((?:19|20)\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?:[-_. T]?([01]\d|2[0-3])[-_.]?([0-5]\d)[-_.]?([0-5]\d))?/.exec(
+  const m = /(?<![0-9])((?:19|20)\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?:[-_. T]?([01]\d|2[0-3])[-_.]?([0-5]\d)(?:[-_.]?([0-5]\d))?)?/.exec(
     name
   );
   if (!m) return null;
   const [y, mo, d] = [+m[1], +m[2], +m[3]];
   if (m[4] === undefined) return wallFromParts(y, mo, d, 12, 0, 0); // no time: use noon so day-shift can't flip the date
-  return wallFromParts(y, mo, d, +m[4], +m[5], +m[6]);
+  const sec = m[6] !== undefined ? +m[6] : 0;
+  return wallFromParts(y, mo, d, +m[4], +m[5], sec);
 }
 
 let cachedPrefix: string | null = null;
@@ -95,7 +96,11 @@ function resourcePrefix(app: App): string {
 }
 
 function encodePath(p: string): string {
-  return encodeURI(p.replace(/\\/g, "/").replace(/^\/+/, "")).replace(/#/g, "%23").replace(/\?/g, "%3F");
+  const norm = p.replace(/\\/g, "/");
+  const isUnc = norm.startsWith("//");
+  const clean = isUnc ? norm.slice(2) : norm.replace(/^\/+/, "");
+  const encoded = encodeURI(clean).replace(/#/g, "%23").replace(/\?/g, "%3F");
+  return isUnc ? "//" + encoded : encoded;
 }
 
 /** URL Obsidian can load for an absolute disk path (nothing is copied into the vault). */
@@ -105,7 +110,11 @@ export function resourceUrl(app: App, absPath: string): string {
 }
 
 export function fileUrl(absPath: string): string {
-  return "file:///" + encodePath(absPath);
+  const enc = encodePath(absPath);
+  if (enc.startsWith("//")) {
+    return "file:" + enc;
+  }
+  return "file:///" + enc;
 }
 
 interface ElectronShell {

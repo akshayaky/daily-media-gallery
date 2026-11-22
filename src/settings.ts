@@ -40,7 +40,7 @@ export const DEFAULT_SETTINGS: DailyMediaSettings = {
   createIfMissing: true,
   thumbSize: 180,
   showTime: true,
-  showNames: false,
+  showNames: true,
   maxItems: 60,
   rescanMinutes: 0,
 };
